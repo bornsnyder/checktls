@@ -1,0 +1,11 @@
+# Keep the Docker build context small and free of local artifacts.
+__pycache__/
+*.pyc
+build/
+dist/
+checktls-backup-*/
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+*.spec

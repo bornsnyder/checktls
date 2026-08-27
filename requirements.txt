@@ -1,0 +1,6 @@
+flask>=3.0
+dnspython>=2.4
+cryptography>=41.0
+beautifulsoup4>=4.12
+requests>=2.31
+gunicorn>=21.2

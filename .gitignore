@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller build artifacts (the standalone exe is built on demand)
+build/
+dist/
+*.spec.bak
+
+# Local backups created during development
+checktls-backup-*/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

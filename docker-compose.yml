@@ -1,0 +1,13 @@
+services:
+  checktls:
+    build: .
+    image: checktls:latest
+    container_name: checktls
+    ports:
+      - "5000:5000"          # host:container — change the left side to expose on another port
+    environment:
+      CHECKTLS_HOST: 0.0.0.0
+      CHECKTLS_PORT: "5000"
+    restart: unless-stopped
+    # The container needs outbound internet access for DNS, the Mimecast fetch
+    # (HTTPS/443), and direct SMTP to mail servers (ports 25 + 465).
