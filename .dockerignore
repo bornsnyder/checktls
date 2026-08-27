@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 checktls-backup-*/
+backups/
 .git/
 .gitignore
 Dockerfile

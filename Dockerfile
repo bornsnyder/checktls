@@ -28,5 +28,8 @@ USER 1000
 
 EXPOSE 5000
 
-# gunicorn gives a stable multi-worker WSGI server suitable for hosting.
-CMD ["gunicorn", "--workers", "2", "--bind", "0.0.0.0:5000", "app:app"]
+# gunicorn serves the app. NOTE: keep --workers 1 — batch-check run state is
+# kept in process memory, so every request (upload + status polling) must hit
+# the same worker. Checks are I/O-bound and already parallelized internally
+# via threads (CHECKTLS_BATCH_WORKERS), so one worker is plenty for this app.
+CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:5000", "app:app"]

@@ -12,6 +12,7 @@ dist/
 
 # Local backups created during development
 checktls-backup-*/
+backups/
 
 # OS / editor noise
 .DS_Store

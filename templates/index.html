@@ -44,6 +44,62 @@
     }
     button:hover { filter: brightness(1.1); }
     button:disabled { opacity: .6; cursor: not-allowed; }
+
+    /* Batch check section */
+    .batch-section {
+      margin-top: 24px; padding: 18px;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+    .batch-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+    .batch-title { font-weight: 700; font-size: 1.05rem; letter-spacing: .02em; }
+    .batch-hint { color: var(--muted); font-size: 0.82rem; margin-bottom: 14px; }
+    .file-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input[type="file"] {
+      flex: 1; min-width: 220px;
+      padding: 10px 14px; font-size: 0.9rem;
+      background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+    }
+    input[type="file"]::file-selector-button {
+      margin-right: 12px; padding: 6px 14px; font-size: 0.85rem; font-weight: 600;
+      background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer;
+    }
+    input[type="file"]::file-selector-button:hover { filter: brightness(1.1); }
+
+    /* Batch results list */
+    .batch-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+    .batch-item {
+      border-radius: 10px; overflow: hidden;
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid var(--border);
+    }
+    .batch-item > summary {
+      cursor: pointer; padding: 12px 16px; font-size: 0.95rem;
+      display: flex; align-items: center; gap: 10px;
+      list-style: none; user-select: none;
+    }
+    .batch-item > summary::-webkit-details-marker { display: none; }
+    .batch-item > summary::before {
+      content: '▸ '; color: var(--muted); font-size: 1rem;
+    }
+    .batch-item[open] > summary::before { content: '▾ '; }
+    .status-dot {
+      width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+      box-shadow: 0 0 6px currentColor;
+    }
+    .batch-item.green > summary { background: var(--green-bg); color: #4ade80; border-bottom: 1px solid rgba(22,163,74,.35); }
+    .batch-item.green .status-dot { background: var(--green); color: var(--green); }
+    .batch-item.yellow > summary { background: var(--yellow-bg); color: #fbbf24; border-bottom: 1px solid rgba(217,119,6,.35); }
+    .batch-item.yellow .status-dot { background: var(--yellow); color: var(--yellow); }
+    .batch-item.red > summary { background: var(--red-bg); color: #f87171; border-bottom: 1px solid rgba(220,38,38,.35); }
+    .batch-item.red .status-dot { background: var(--red); color: var(--red); }
+    .domain-name { font-weight: 600; word-break: break-all; flex: 1; }
+    .overall-label {
+      font-size: 0.72rem; text-transform: uppercase; letter-spacing: .08em;
+      padding: 3px 9px; border-radius: 999px; background: rgba(15,23,42,.6);
+    }
+    .batch-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
     .hint { color: var(--muted); font-size: 0.82rem; margin-bottom: 24px; }
 
     #results { display: flex; flex-direction: column; gap: 16px; }
@@ -112,6 +168,16 @@
 
     <div id="results"></div>
 
+    <section class="batch-section">
+      <div class="batch-head">
+        <span class="batch-title">TLS BATCH CHECK</span>
+        <input type="file" id="batchFile" accept=".csv,text/csv" style="display:none;" />
+        <button type="button" id="btnBatch">TLS BATCH CHECK</button>
+      </div>
+      <p class="batch-hint">Upload a CSV export (data starts at line 4, domain in the second column). A leading <code>@</code> is stripped automatically. Each row becomes an expandable result: green = passed, yellow = partial match, red = failed.</p>
+      <div id="batchResults"></div>
+    </section>
+
     <p class="meta" id="meta"></p>
   </div>
 
@@ -121,6 +187,56 @@
     const btn = document.getElementById('btn');
     const results = document.getElementById('results');
     const meta = document.getElementById('meta');
+
+    // Shared renderer for a single host card (used by both the single check and batch views).
+    function renderHostCard(h) {
+      let html = `<div class="card">`;
+      if (h.status === 'ok') {
+        const bannerClass = h.matched ? 'green' : (h.partial_matched ? 'yellow' : 'red');
+        const bannerText = h.matched
+          ? 'Root CA PRESENT on mimecast'
+          : (h.partial_matched
+              ? 'Root CA PARTIALLY MATCHED on mimecast'
+              : 'Root CA NOT PRESENT on mimecast');
+        html += `<div class="banner ${bannerClass}">${esc(bannerText)}</div>`;
+      } else {
+        html += `<div class="banner red" style="font-size:1.05rem;">CHECK FAILED</div>`;
+      }
+
+      html += `<div class="host-head">
+          <span class="host-name">${esc(h.host)}</span>
+          ${h.priority != null ? `<span class="prio">MX priority ${esc(h.priority)}</span>` : ''}
+        </div>`;
+
+      if (h.status === 'ok' && h.valid_until) {
+        html += `<div class="valid-until"><span class="label">Certificate valid until:</span> <strong>${esc(h.valid_until)}</strong></div>`;
+      }
+
+      if (h.status === 'ok') {
+        html += `<dl class="kv">
+            <dt>Root CA</dt><dd>${esc(h.root_ca || 'unknown')}</dd>
+            <dt>Leaf cert CN</dt><dd>${esc(h.leaf_cn || 'n/a')}</dd>`;
+        if (h.matched && h.matched_entry) {
+          html += `<dt>Mimecast entry</dt><dd>${esc(h.matched_entry)}</dd>`;
+        }
+        if (!h.matched && h.partial_matched && h.partial_entry) {
+          html += `<dt>Closest Mimecast entry</dt><dd>${esc(h.partial_entry)}</dd>`;
+        }
+        html += `</dl>`;
+      }
+
+      if (h.status === 'ok' && Array.isArray(h.details) && h.details.length) {
+        const chainText = formatChainDetails(h);
+        html += `<details class="chain"><summary>Certificate chain details</summary><pre>${esc(chainText)}</pre></details>`;
+      }
+
+      if (h.error) {
+        const isNote = h.status === 'ok';
+        html += `<div class="${isNote ? 'note' : 'err'}">${esc(h.error)}</div>`;
+      }
+      html += `</div>`;
+      return html;
+    }
 
     // Render the per-host certificate chain in the requested text format.
     function formatChainDetails(h) {
@@ -176,58 +292,7 @@
 
         let html = '';
         for (const h of data.hosts) {
-          // Green = full match, yellow = partial brand match, red = no match / failure.
-          const bannerClass = h.status === 'ok'
-            ? (h.matched ? 'green' : (h.partial_matched ? 'yellow' : 'red'))
-            : '';
-          const bannerText = h.status !== 'ok'
-            ? 'CHECK FAILED'
-            : (h.matched
-                ? 'Root CA PRESENT on mimecast'
-                : (h.partial_matched
-                    ? 'Root CA PARTIALLY MATCHED on mimecast'
-                    : 'Root CA NOT PRESENT on mimecast'));
-
-          html += `<div class="card">`;
-          if (bannerClass) {
-            html += `<div class="banner ${bannerClass}">${esc(bannerText)}</div>`;
-          } else {
-            html += `<div class="banner red" style="font-size:1.05rem;">${esc('CHECK FAILED')}</div>`;
-          }
-
-          html += `<div class="host-head">
-              <span class="host-name">${esc(h.host)}</span>
-              ${h.priority != null ? `<span class="prio">MX priority ${esc(h.priority)}</span>` : ''}
-            </div>`;
-
-          if (h.status === 'ok' && h.valid_until) {
-            html += `<div class="valid-until"><span class="label">Certificate valid until:</span> <strong>${esc(h.valid_until)}</strong></div>`;
-          }
-
-          if (h.status === 'ok') {
-            html += `<dl class="kv">
-                <dt>Root CA</dt><dd>${esc(h.root_ca || 'unknown')}</dd>
-                <dt>Leaf cert CN</dt><dd>${esc(h.leaf_cn || 'n/a')}</dd>`;
-            if (h.matched && h.matched_entry) {
-              html += `<dt>Mimecast entry</dt><dd>${esc(h.matched_entry)}</dd>`;
-            }
-            if (!h.matched && h.partial_matched && h.partial_entry) {
-              html += `<dt>Closest Mimecast entry</dt><dd>${esc(h.partial_entry)}</dd>`;
-            }
-            html += `</dl>`;
-          }
-
-          // Collapsed certificate-chain DETAILS (expanded on click).
-          if (h.status === 'ok' && Array.isArray(h.details) && h.details.length) {
-            const chainText = formatChainDetails(h);
-            html += `<details class="chain"><summary>Certificate chain details</summary><pre>${esc(chainText)}</pre></details>`;
-          }
-
-          if (h.error) {
-            const isNote = h.status === 'ok';
-            html += `<div class="${isNote ? 'note' : 'err'}">${esc(h.error)}</div>`;
-          }
-          html += `</div>`;
+          html += renderHostCard(h);
         }
         results.innerHTML = html;
 
@@ -240,6 +305,148 @@
         btn.disabled = false;
         btn.textContent = 'Check';
       }
+    });
+
+    // ------------------------------------------------------------------ //
+    // Batch check (CSV upload)                                           //
+    // ------------------------------------------------------------------ //
+    const batchFile = document.getElementById('batchFile');
+    const btnBatch = document.getElementById('btnBatch');
+    const batchResults = document.getElementById('batchResults');
+
+    let batchPollTimer = null;
+    let batchRunId = null;
+    let batchTotal = 0;
+    let batchCaCount = 0;
+
+    function overallLabel(overall) {
+      return overall === 'green' ? 'PASSED'
+           : overall === 'yellow' ? 'PARTIAL'
+           : 'FAILED';
+    }
+
+    // Render one expandable row for a finished domain result.
+    function renderBatchItem(r) {
+      const overall = r.overall || 'red';
+      const label = overallLabel(overall);
+      let body = '';
+      if (r.error && !(r.hosts && r.hosts.length)) {
+        body += `<div class="err">${esc(r.error)}</div>`;
+      }
+      for (const h of (r.hosts || [])) {
+        body += renderHostCard(h);
+      }
+      return `
+        <details class="batch-item ${overall}">
+          <summary>
+            <span class="status-dot"></span>
+            <span class="domain-name">${esc(r.domain)}</span>
+            <span class="overall-label">${label}</span>
+          </summary>
+          <div class="batch-body">${body}</div>
+        </details>`;
+    }
+
+    // Re-render the batch list from a snapshot, preserving which rows are open.
+    function renderBatchList(snapshot) {
+      const openSet = new Set(
+        [...batchResults.querySelectorAll('details.batch-item[open] .domain-name')]
+          .map(el => el.textContent)
+      );
+
+      let html = '';
+      for (const r of snapshot.results) {
+        const item = renderBatchItem(r);
+        if (openSet.has(r.domain)) {
+          // Re-open the row so expanding a result survives re-renders.
+          html += item.replace('<details class="batch-item', '<details open class="batch-item');
+        } else {
+          html += item;
+        }
+      }
+
+      const pct = batchTotal ? Math.round((snapshot.done_count / batchTotal) * 100) : 0;
+      let head = '';
+      if (!snapshot.finished) {
+        head = `<div class="spinner">Checking ${batchTotal} domain(s)… ${snapshot.done_count}/${batchTotal} done (${pct}%)</div>`;
+      } else {
+        const counts = { green: 0, yellow: 0, red: 0 };
+        for (const r of snapshot.results) counts[r.overall || 'red']++;
+        head = `<p class="hint" style="margin-top:14px;">${batchTotal} domain(s) checked — ` +
+          `<span style="color:#4ade80;">${counts.green} passed</span>, ` +
+          `<span style="color:#fbbf24;">${counts.yellow} partial</span>, ` +
+          `<span style="color:#f87171;">${counts.red} failed</span>` +
+          (batchCaCount ? ` · compared against ${batchCaCount} Mimecast supported certificates.` : '') +
+          `</p>`;
+      }
+      if (snapshot.error) {
+        head += `<div class="err">${esc(snapshot.error)}</div>`;
+      }
+
+      batchResults.innerHTML = head + `<div class="batch-list">${html}</div>`;
+    }
+
+    function stopBatchPolling() {
+      if (batchPollTimer) { clearInterval(batchPollTimer); batchPollTimer = null; }
+      btnBatch.disabled = false;
+      btnBatch.textContent = 'TLS BATCH CHECK';
+    }
+
+    async function pollBatchStatus() {
+      try {
+        const resp = await fetch(`/api/batch-check/${batchRunId}`);
+        if (!resp.ok) throw new Error('Lost the batch run.');
+        const snapshot = await resp.json();
+        renderBatchList(snapshot);
+        if (snapshot.finished) stopBatchPolling();
+      } catch (err) {
+        batchResults.innerHTML += `<div class="err">${esc(err.message)}</div>`;
+        stopBatchPolling();
+      }
+    }
+
+    // Upload the CSV and start polling for results.
+    async function startBatch(file) {
+      btnBatch.disabled = true;
+      btnBatch.textContent = 'Running…';
+      batchResults.innerHTML = '<div class="spinner">Uploading CSV and starting the batch check…</div>';
+
+      const fd = new FormData();
+      fd.append('file', file);
+
+      try {
+        const resp = await fetch('/api/batch-check', { method: 'POST', body: fd });
+        const data = await resp.json();
+        if (!resp.ok) {
+          batchResults.innerHTML = `<div class="top-error">${esc(data.error || 'Batch check failed.')}</div>`;
+          stopBatchPolling();
+          return;
+        }
+
+        batchRunId = data.run_id;
+        batchTotal = data.count;
+        batchCaCount = data.mimecast_ca_count || 0;
+        renderBatchList({ total: batchTotal, done_count: 0, finished: false, error: null, results: [] });
+        if (batchPollTimer) clearInterval(batchPollTimer);
+        batchPollTimer = setInterval(pollBatchStatus, 1500);
+      } catch (err) {
+        batchResults.innerHTML = `<div class="top-error">Request failed: ${esc(err.message)}</div>`;
+        stopBatchPolling();
+      }
+    }
+
+    // The button always opens the file picker so a new CSV can be uploaded on every click.
+    btnBatch.addEventListener('click', () => {
+      batchFile.click();
+    });
+
+    // As soon as a CSV is selected, start the batch check with it.
+    batchFile.addEventListener('change', () => {
+      const file = batchFile.files && batchFile.files[0];
+      if (!file) return;
+      startBatch(file);
+      // Reset so selecting the very same file again later still fires 'change'.
+      batchFile.value = '';
     });
   </script>
 </body>

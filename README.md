@@ -32,6 +32,36 @@ Certificate #2 of 3 (sent by MX):
 
 The OCSP line is a best-effort revocation check; if the server does not configure an OCSP responder (common for mail), it reads `OCSP status unknown`.
 
+## TLS Batch Check (CSV upload)
+
+The main page has a **TLS BATCH CHECK** button for checking many domains at once.
+Clicking it opens the file picker; as soon as you select a CSV, the batch check
+starts automatically and results appear incrementally in an expandable list:
+
+- 🟢 green — domain passed (at least one MX host's root CA fully matches Mimecast).
+- 🟡 yellow — partial match only.
+- 🔴 red — failed (no match, or DNS/TLS error / no MX records).
+
+Each row can be expanded to show the full per-MX-host details for that domain
+(same cards as a single check). A summary line shows how many domains passed,
+partially matched and failed once the run completes.
+
+The expected CSV format is an export like `example.csv`:
+
+```csv
+Local Group Members Export - 2026-08-27 16:57:02
+
+"Address","Domain","Details","Note"," Int",
+,"'@abchina.com",,,"External",
+,"'@abchina.com.cn",,,"External",
+```
+
+Data rows start at line 4; the domain is taken from the second column —
+everything after a leading `@` (up to the closing quote) is used as the domain.
+Leading quotes/`@`, whitespace and trailing dots are stripped, duplicates are
+removed, and rows without a usable domain are skipped. Checks run in parallel
+(`CHECKTLS_BATCH_WORKERS`, default 8).
+
 ## Run locally
 
 ```bash
@@ -80,4 +110,4 @@ names, and cached in memory for ~6 hours. If the live fetch fails, the last good
 
 - Many mail servers do **not** send the root certificate; in that case the root name is derived from the topmost presented cert's issuer (shown with a note).
 - Matching is normalized + family-based: e.g. a DigiCert leaf/intermediate matches the DigiCert entries in Mimecast's list.
-- Running `py app.py` uses Flask's development server, which is fine for local use. For hosting, run under **gunicorn** (used by the Docker image): `gunicorn -w 2 -b 0.0.0.0:5000 app:app`. The bind address/port can be set via `CHECKTLS_HOST` / `CHECKTLS_PORT`.
+- Running `py app.py` uses Flask's development server, which is fine for local use. For hosting, run under **gunicorn** (used by the Docker image): `gunicorn -w 1 -b 0.0.0.0:5000 app:app`. Keep `-w 1`: batch-check run state lives in process memory, so all requests must hit the same worker. The bind address/port can be set via `CHECKTLS_HOST` / `CHECKTLS_PORT`.

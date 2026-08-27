@@ -12,12 +12,16 @@ Run:  py app.py   ->  http://localhost:5000
 """
 
 import base64
+import concurrent.futures
+import csv
 import datetime as dt_module
+import io
 import os
 import re
 import socket
 import ssl
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -658,24 +662,35 @@ def api_check():
     if not domain:
         return jsonify({"error": "Please enter a domain."}), 400
 
+    result, status_code = run_domain_check(domain)
+    return jsonify(result), status_code
+
+
+def run_domain_check(domain: str) -> tuple[dict, int]:
+    """Run the full MX/TLS/Mimecast check for one domain.
+
+    Returns (payload_dict, http_status). The payload always contains at least
+    ``domain`` and either a list of ``hosts`` or an ``error`` string.
+    """
     # Make sure the Mimecast list is fresh before matching.
     try:
         mimecast_list.refresh_if_stale()
     except Exception as exc:
-        return jsonify({"error": f"Could not load Mimecast CA list: {exc}"}), 502
+        return {"domain": domain, "mx_count": 0, "hosts": [],
+                "error": f"Could not load Mimecast CA list: {exc}"}, 502
 
     try:
         mxs = resolve_mx(domain)
     except dns.resolver.NXDOMAIN:
-        return jsonify({"domain": domain, "mx_count": 0, "hosts": [],
-                        "error": f"No MX records found for {domain}."}), 200
+        return {"domain": domain, "mx_count": 0, "hosts": [],
+                "error": f"No MX records found for {domain}."}, 200
     except Exception as exc:
-        return jsonify({"domain": domain, "mx_count": 0, "hosts": [],
-                        "error": f"DNS lookup failed: {exc}"}), 200
+        return {"domain": domain, "mx_count": 0, "hosts": [],
+                "error": f"DNS lookup failed: {exc}"}, 200
 
     if not mxs:
-        return jsonify({"domain": domain, "mx_count": 0, "hosts": [],
-                        "error": f"No MX records found for {domain}."}), 200
+        return {"domain": domain, "mx_count": 0, "hosts": [],
+                "error": f"No MX records found for {domain}."}, 200
 
     hosts = []
     for priority, host in mxs:
@@ -696,12 +711,198 @@ def api_check():
             "error": hr.error,
         })
 
-    return jsonify({
+    return {
         "domain": domain,
         "mx_count": len(mxs),
         "mimecast_ca_count": mimecast_list.count,
         "hosts": hosts,
+    }, 200
+
+
+# --------------------------------------------------------------------------- #
+# Batch check (CSV upload)                                                    #
+# --------------------------------------------------------------------------- #
+def _clean_domain(raw: str) -> Optional[str]:
+    """Normalize a raw CSV cell into a domain, or None if it is not usable.
+
+    Handles values like ``'@abchina.com`` / ``@example.com`` by stripping the
+    leading quote and ``@``, plus surrounding whitespace/quotes. Returns the
+    lowercased domain without any trailing dot.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    # Strip a leading single/double quote, then a leading '@' (possibly repeated).
+    s = s.lstrip("\'")
+    s = s.strip().lstrip("@").strip()
+    s = s.strip('\"').strip()
+    if not s:
+        return None
+    domain = s.lower().rstrip(".")
+    # A usable domain needs at least a dot and only valid characters.
+    if "." not in domain or not re.fullmatch(r"[a-z0-9.-]+", domain):
+        return None
+    return domain
+
+
+def parse_batch_csv(text: str) -> list[str]:
+    """Extract the list of domains from an uploaded batch CSV.
+
+    The data set starts at line 4 (1-based); lines before that are a title and
+    header row. Domains live in the second column ('Domain') and may carry a
+    leading ``@`` which is stripped here.
+    """
+    domains: list[str] = []
+    seen: set[str] = set()
+    reader = csv.reader(io.StringIO(text))
+    for i, row in enumerate(reader):
+        if i < 3:  # skip title line + header (data starts at line 4)
+            continue
+        if not row:
+            continue
+        cell = row[1] if len(row) > 1 else ""
+        domain = _clean_domain(cell)
+        if domain and domain not in seen:
+            seen.add(domain)
+            domains.append(domain)
+    return domains
+
+
+# Batch check concurrency: how many domains to inspect in parallel.
+BATCH_WORKERS = int(os.environ.get("CHECKTLS_BATCH_WORKERS", "8"))
+
+# In-memory store of batch runs so the browser can poll progress while the
+# checks are still running (a single blocking response would time out for large CSVs).
+_batch_runs: dict[str, dict] = {}
+_batch_runs_lock = threading.Lock()
+
+
+def _new_batch_run(domains: list[str]) -> str:
+    run_id = f"{time.time_ns():x}"
+    with _batch_runs_lock:
+        # Drop old finished runs to keep memory bounded (keep the 20 most recent).
+        finished = [rid for rid, r in _batch_runs.items() if r["finished_at"] is not None]
+        for rid in finished[:-20] if len(finished) > 20 else []:
+            del _batch_runs[rid]
+        _batch_runs[run_id] = {
+            "total": len(domains),
+            "results": [None] * len(domains),
+            "done_count": 0,
+            "error": None,
+            "started_at": time.time(),
+            "finished_at": None,
+        }
+    return run_id
+
+
+def _batch_worker(run_id: str, index: int, domain: str) -> None:
+    payload, _status = run_domain_check(domain)
+    hosts = payload.get("hosts") or []
+    if not hosts and payload.get("error"):
+        overall = "red"
+    else:
+        ok_hosts = [h for h in hosts if h["status"] == "ok"]
+        host_statuses = [
+            ("green" if h["matched"] else ("yellow" if h["partial_matched"] else "red"))
+            for h in ok_hosts
+        ]
+        if not host_statuses:
+            overall = "red"
+        elif any(s == "green" for s in host_statuses):
+            overall = "green"
+        elif any(s == "yellow" for s in host_statuses):
+            overall = "yellow"
+        else:
+            overall = "red"
+    entry = {"domain": domain, "overall": overall, **payload}
+    with _batch_runs_lock:
+        run = _batch_runs.get(run_id)
+        if run is None:
+            return
+        run["results"][index] = entry
+        run["done_count"] += 1
+
+
+def _run_batch_async(domains: list[str], run_id: str) -> None:
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
+            futures = [
+                pool.submit(_batch_worker, run_id, i, d)
+                for i, d in enumerate(domains)
+            ]
+            for f in futures:
+                try:
+                    f.result()
+                except Exception as exc:  # a worker should not die silently
+                    with _batch_runs_lock:
+                        if run_id in _batch_runs and _batch_runs[run_id]["error"] is None:
+                            _batch_runs[run_id]["error"] = str(exc)
+    finally:
+        with _batch_runs_lock:
+            run = _batch_runs.get(run_id)
+            if run is not None:
+                run["finished_at"] = time.time()
+
+
+def _batch_run_snapshot(run: dict) -> dict:
+    results = [r for r in run["results"] if r is not None]
+    return {
+        "total": run["total"],
+        "done_count": run["done_count"],
+        "finished": run["finished_at"] is not None,
+        "error": run["error"],
+        "results": results,
+    }
+
+
+@app.route("/api/batch-check", methods=["POST"])
+def api_batch_check():
+    file = request.files.get("file")
+    if file is None or not (file.filename or "").strip():
+        return jsonify({"error": "No CSV file uploaded."}), 400
+
+    raw = file.read()
+    try:
+        text = raw.decode("utf-8-sig", errors="replace")
+    except Exception as exc:  # pragma: no cover - decode with replace rarely fails
+        return jsonify({"error": f"Could not read uploaded file: {exc}"}), 400
+
+    domains = parse_batch_csv(text)
+    if not domains:
+        return jsonify({
+            "error": (
+                "No usable domains found in the CSV. Expected data starting at "
+                "line 4 with the domain (possibly prefixed with '@') in the second column."
+            ),
+            "domains": [],
+        }), 400
+
+    # Make sure the Mimecast list is loaded before any worker starts matching.
+    try:
+        mimecast_list.refresh_if_stale()
+    except Exception as exc:
+        return jsonify({"error": f"Could not load Mimecast CA list: {exc}"}), 502
+
+    run_id = _new_batch_run(domains)
+    threading.Thread(
+        target=_run_batch_async, args=(domains, run_id), daemon=True
+    ).start()
+
+    return jsonify({
+        "run_id": run_id,
+        "count": len(domains),
+        "mimecast_ca_count": mimecast_list.count,
     })
+
+
+@app.route("/api/batch-check/<run_id>", methods=["GET"])
+def api_batch_check_status(run_id: str):
+    with _batch_runs_lock:
+        run = _batch_runs.get(run_id)
+        if run is None:
+            return jsonify({"error": "Unknown batch run."}), 404
+        snapshot = _batch_run_snapshot(run)
+    return jsonify(snapshot)
 
 
 def _build_ocsp_request(cert: x509.Certificate, issuer_cert: x509.Certificate) -> bytes:
