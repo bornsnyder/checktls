@@ -12,8 +12,11 @@ For each MX host it:
 The result per MX host is shown as:
 - 🟢 **Root CA PRESENT on mimecast** (green) — the root CA fully matches a Mimecast entry.
 - 🟡 **Root CA PARTIALLY MATCHED on mimecast** (yellow) — no exact match, but the CA shares meaningful brand words with one or more Mimecast entries (e.g. Mimecast lists `deutsche telekom root ca 1` while the server presents `Telekom Security ServerID OV Class 2 CA (Deutsche Telekom Security GmbH)`). This is "found in parts" — likely valid, but not a 100% match.
+- 🔴 **Certificate Expired** (red) — the leaf certificate's *Not Valid After* date is in the past. This takes precedence over any root-CA match: an expired certificate is unusable regardless of which CA signed it.
 - 🔴 **Root CA NOT PRESENT on mimecast** (red) — no exact or partial match.
 - or an error card if DNS/TLS fails.
+
+Self-signed certificates whose subject/issuer fields are empty (or contain only placeholder characters such as `''`) are reported with root CA `unknown` and never match the Mimecast list.
 
 Each successful host also shows a collapsed **Certificate chain details** block. Click it to expand the full presented chain in text form, e.g.:
 
@@ -45,6 +48,23 @@ starts automatically and results appear incrementally in an expandable list:
 Each row can be expanded to show the full per-MX-host details for that domain
 (same cards as a single check). A summary line shows how many domains passed,
 partially matched and failed once the run completes.
+
+When the run finishes, a **CSV report** of all results is written on the server
+(into `reports/`, or the directory set via `CHECKTLS_REPORT_DIR`) and a
+**Download CSV report** button appears. The report uses quoted,
+semicolon-separated fields (with a trailing `;` per line), one row per domain:
+
+```csv
+"Domain";"Status";"Subject";"Issuer";"MimecastEntry";"ValidUntil";"RootCA";"LeafCertCN";
+"hannover-re.com";"PASSED";"subject: /C=GB/L=London/O=Mimecast Services Limited/CN=*.mimecast.com";"issuer: /C=US/O=DigiCert Inc/CN=DigiCert Global G2 TLS RSA SHA256 2020 CA1";"digicert assured id ca-1 (digicert assured id root ca)";"Feb 24 23:59:59 2027 GMT";"DigiCert Global G2 TLS RSA SHA256 2020 CA1 (DigiCert Inc)";"*.mimecast.com";
+```
+
+- **Status** reflects the overall check status of the domain: `PASSED` (green),
+  `PARTIALLY` (yellow) or `FAILED` (red — including expired certificates and
+  DNS/TLS errors).
+- The certificate fields are taken from the most representative MX host (best
+  match first; an expired host is only used when no better one exists).
+- Files are UTF-8 with BOM so Excel renders non-ASCII subjects correctly.
 
 The expected CSV format is an export like `example.csv`:
 
@@ -99,6 +119,9 @@ To expose it on a different host port, change the left side of the mapping in
 > the Mimecast fetch (HTTPS/443), and direct SMTP to mail servers (**ports 25 + 465**).
 > On a corporate network that blocks outbound SMTP (e.g. Zscaler), checks will fail
 > with connection timeouts.
+>
+> Batch CSV reports are stored in `/app/reports` inside the container; the compose
+> file mounts it as the `checktls_reports` volume so they survive container rebuilds.
 
 ## How the Mimecast list is obtained
 

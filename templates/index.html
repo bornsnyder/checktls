@@ -102,6 +102,14 @@
     .batch-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
     .hint { color: var(--muted); font-size: 0.82rem; margin-bottom: 24px; }
 
+    /* Download button for the finished batch CSV report */
+    .report-row { margin-top: 16px; display: flex; justify-content: center; }
+    .btn-download {
+      display: inline-block; padding: 10px 22px; font-size: 0.9rem; font-weight: 600;
+      background: var(--accent); color: #fff; border-radius: 8px; text-decoration: none;
+    }
+    .btn-download:hover { filter: brightness(1.1); }
+
     #results { display: flex; flex-direction: column; gap: 16px; }
     .card {
       background: var(--panel); border: 1px solid var(--border);
@@ -174,7 +182,7 @@
         <input type="file" id="batchFile" accept=".csv,text/csv" style="display:none;" />
         <button type="button" id="btnBatch">TLS BATCH CHECK</button>
       </div>
-      <p class="batch-hint">Upload a CSV export (data starts at line 4, domain in the second column). A leading <code>@</code> is stripped automatically. Each row becomes an expandable result: green = passed, yellow = partial match, red = failed.</p>
+      <p class="batch-hint">Upload a CSV export (data starts at line 4, domain in the second column). A leading <code>@</code> is stripped automatically. Each row becomes an expandable result: green = passed, yellow = partial match, red = failed. When the run finishes, a CSV report of all results is saved on the server and can be downloaded.</p>
       <div id="batchResults"></div>
     </section>
 
@@ -192,12 +200,16 @@
     function renderHostCard(h) {
       let html = `<div class="card">`;
       if (h.status === 'ok') {
-        const bannerClass = h.matched ? 'green' : (h.partial_matched ? 'yellow' : 'red');
-        const bannerText = h.matched
-          ? 'Root CA PRESENT on mimecast'
-          : (h.partial_matched
-              ? 'Root CA PARTIALLY MATCHED on mimecast'
-              : 'Root CA NOT PRESENT on mimecast');
+        // An expired certificate always shows red, even when the root CA matches.
+        const bannerClass = h.expired ? 'red'
+          : (h.matched ? 'green' : (h.partial_matched ? 'yellow' : 'red'));
+        const bannerText = h.expired
+          ? 'Certificate Expired'
+          : (h.matched
+              ? 'Root CA PRESENT on mimecast'
+              : (h.partial_matched
+                  ? 'Root CA PARTIALLY MATCHED on mimecast'
+                  : 'Root CA NOT PRESENT on mimecast'));
         html += `<div class="banner ${bannerClass}">${esc(bannerText)}</div>`;
       } else {
         html += `<div class="banner red" style="font-size:1.05rem;">CHECK FAILED</div>`;
@@ -209,7 +221,8 @@
         </div>`;
 
       if (h.status === 'ok' && h.valid_until) {
-        html += `<div class="valid-until"><span class="label">Certificate valid until:</span> <strong>${esc(h.valid_until)}</strong></div>`;
+        const expiredStyle = h.expired ? ' style="color:#f87171;"' : '';
+        html += `<div class="valid-until"><span class="label">Certificate valid until:</span> <strong${expiredStyle}>${esc(h.valid_until)}</strong></div>`;
       }
 
       if (h.status === 'ok') {
@@ -378,6 +391,9 @@
           `<span style="color:#f87171;">${counts.red} failed</span>` +
           (batchCaCount ? ` · compared against ${batchCaCount} Mimecast supported certificates.` : '') +
           `</p>`;
+        if (snapshot.report_url) {
+          head += `<div class="report-row"><a class="btn-download" href="${esc(snapshot.report_url)}">⬇ Download CSV report</a></div>`;
+        }
       }
       if (snapshot.error) {
         head += `<div class="err">${esc(snapshot.error)}</div>`;

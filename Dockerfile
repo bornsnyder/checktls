@@ -23,6 +23,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY templates/ ./templates/
 
+# Batch CSV reports are written here at runtime; make it writable by the
+# non-root user. Override with CHECKTLS_REPORT_DIR if you want them elsewhere.
+RUN mkdir -p /app/reports && chown 1000:1000 /app/reports
+
 # Run as an unprivileged user (created by python:slim).
 USER 1000
 

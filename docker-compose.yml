@@ -9,5 +9,9 @@ services:
       CHECKTLS_HOST: 0.0.0.0
       CHECKTLS_PORT: "5000"
     restart: unless-stopped
+    volumes:
+      - checktls_reports:/app/reports   # batch CSV reports survive container rebuilds
     # The container needs outbound internet access for DNS, the Mimecast fetch
     # (HTTPS/443), and direct SMTP to mail servers (ports 25 + 465).
+volumes:
+  checktls_reports:

@@ -31,7 +31,7 @@ import requests
 from bs4 import BeautifulSoup
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 
 def _resource_dir() -> str:
     """Directory that holds bundled resources (templates).
@@ -122,6 +122,12 @@ class MimecastList:
     def match(self, name: str) -> tuple[bool, Optional[str]]:
         """Return (matched, matched_entry)."""
         norm = _normalize(name)
+        # Empty or meaningless names must never match. An empty string is a
+        # substring of every list entry, so without this guard a self-signed
+        # cert whose subject/issuer fields are all empty would "match" the
+        # first Mimecast entry.
+        if len(norm) < 4:
+            return False, None
         # 1. Exact normalized match.
         for raw, n in zip(self._names, self._normalized):
             if n and n == norm:
@@ -331,6 +337,7 @@ class HostResult:
     root_ca: Optional[str] = None
     leaf_cn: Optional[str] = None
     valid_until: Optional[str] = None
+    expired: bool = False
     matched_entry: Optional[str] = None
     partial_entry: Optional[str] = None
     port_used: Optional[int] = None
@@ -373,15 +380,24 @@ def _valid_until(leaf: x509.Certificate) -> Optional[str]:
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _subject_str(cert: x509.Certificate) -> str:
-    parts = []
-    for oid, value in cert.subject.items():
-        try:
-            name = oid._name  # type: ignore[attr-defined]
-        except Exception:
-            name = str(oid)
-        parts.append(f"{name}={value}")
-    return ", ".join(parts)
+def _is_expired(leaf: x509.Certificate) -> bool:
+    """True if the leaf certificate's 'not after' date is in the past (UTC)."""
+    try:
+        not_after = leaf.not_valid_after_utc
+    except AttributeError:
+        # cryptography < 42 fallback (naive, treated as UTC)
+        not_after = leaf.not_valid_after.replace(tzinfo=dt_module.timezone.utc)
+    return not_after <= dt_module.datetime.now(dt_module.timezone.utc)
+
+
+def _has_meaningful_content(name: Optional[str]) -> bool:
+    """True if the name carries real content.
+
+    Empty strings and placeholder-only values (e.g. ``''``) normalize to
+    nothing and must be treated as absent so they can never leak into a root
+    CA name or match an entry in the Mimecast list.
+    """
+    return len(_normalize(name or "")) >= 2
 
 
 def _is_self_signed(cert: x509.Certificate) -> bool:
@@ -418,6 +434,7 @@ def inspect_host(host: str, priority: int) -> HostResult:
 
         root_ca, leaf_cn, derived = _identify_root(chain)
         valid_until = _valid_until(chain[0])
+        result.expired = _is_expired(chain[0])
         matched, entry = mimecast_list.match(root_ca)
         partial_matched, partial_entry = (False, None)
         if not matched:
@@ -532,6 +549,44 @@ def _der_to_pem(der: bytes) -> bytes:
     return ("-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n").encode()
 
 
+def _readable_name_from_dn(name: x509.Name) -> Optional[str]:
+    """Build a readable name from a distinguished name.
+
+    Prefers the ``CN (O)`` form so family matching has more to work with. Returns
+    None when no attribute carries meaningful content — e.g. a self-signed cert
+    whose subject/issuer fields are all empty or placeholder characters like ''
+    — so callers can fall back to "unknown" instead of matching on noise.
+    """
+    cn = None
+    org = None
+    try:
+        c = name.get_attributes_for_oid(NameOID.COMMON_NAME)
+        if c:
+            cn = str(c[0].value)
+        o = name.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+        if o:
+            org = str(o[0].value)
+    except Exception:
+        pass
+    # Drop attribute values that carry no meaningful content (empty strings or
+    # placeholder characters like '') so they cannot leak into the root name.
+    if cn is not None and not _has_meaningful_content(cn):
+        cn = None
+    if org is not None and not _has_meaningful_content(org):
+        org = None
+    if cn and org:
+        return f"{cn} ({org})"
+    if cn:
+        return cn
+    # Last resort: the full DN, but only if some attribute actually has content.
+    try:
+        if any(_has_meaningful_content(str(attr.value)) for attr in name):
+            return _name_to_str(name)
+    except Exception:
+        pass
+    return None
+
+
 def _identify_root(chain: list[x509.Certificate]) -> tuple[str, Optional[str], bool]:
     """Return (root_ca_name, leaf_cn, derived_flag)."""
     if not chain:
@@ -543,29 +598,11 @@ def _identify_root(chain: list[x509.Certificate]) -> tuple[str, Optional[str], b
     # If the last cert in the presented chain is self-signed, it IS the root.
     last = chain[-1]
     if len(chain) > 1 and _is_self_signed(last):
-        return (_get_cn(last) or _subject_str(last)), leaf_cn, False
+        return (_readable_name_from_dn(last.subject) or "unknown"), leaf_cn, False
 
     # Otherwise derive the root from the topmost cert's issuer (server omitted the root).
-    # Prefer a readable "CN (O)" form over just the CN so family matching has more to work with.
-    issuer_name = last.issuer
-    cn = None
-    org = None
-    try:
-        c = issuer_name.get_attributes_for_oid(NameOID.COMMON_NAME)
-        if c:
-            cn = str(c[0].value)
-        o = issuer_name.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
-        if o:
-            org = str(o[0].value)
-    except Exception:
-        pass
-    if cn and org:
-        derived_name = f"{cn} ({org})"
-    elif cn:
-        derived_name = cn
-    else:
-        derived_name = _name_to_str(issuer_name)
-    return derived_name, leaf_cn, True
+    derived_name = _readable_name_from_dn(last.issuer)
+    return (derived_name or "unknown"), leaf_cn, True
 
 
 def _name_to_str(name: x509.Name) -> str:
@@ -703,6 +740,7 @@ def run_domain_check(domain: str) -> tuple[dict, int]:
             "root_ca": hr.root_ca,
             "leaf_cn": hr.leaf_cn,
             "valid_until": hr.valid_until,
+            "expired": hr.expired,
             "partial_matched": hr.partial_matched,
             "partial_entry": hr.partial_entry,
             "matched_entry": hr.matched_entry,
@@ -791,8 +829,24 @@ def _new_batch_run(domains: list[str]) -> str:
             "error": None,
             "started_at": time.time(),
             "finished_at": None,
+            "report_path": None,
         }
     return run_id
+
+
+def _host_color(host: dict) -> str:
+    """Status color for one MX host result.
+
+    An expired certificate always counts as red (failed), even when its root CA
+    matches the Mimecast list — an expired cert is unusable regardless.
+    """
+    if host.get("expired"):
+        return "red"
+    if host.get("matched"):
+        return "green"
+    if host.get("partial_matched"):
+        return "yellow"
+    return "red"
 
 
 def _batch_worker(run_id: str, index: int, domain: str) -> None:
@@ -802,10 +856,7 @@ def _batch_worker(run_id: str, index: int, domain: str) -> None:
         overall = "red"
     else:
         ok_hosts = [h for h in hosts if h["status"] == "ok"]
-        host_statuses = [
-            ("green" if h["matched"] else ("yellow" if h["partial_matched"] else "red"))
-            for h in ok_hosts
-        ]
+        host_statuses = [_host_color(h) for h in ok_hosts]
         if not host_statuses:
             overall = "red"
         elif any(s == "green" for s in host_statuses):
@@ -842,17 +893,26 @@ def _run_batch_async(domains: list[str], run_id: str) -> None:
             run = _batch_runs.get(run_id)
             if run is not None:
                 run["finished_at"] = time.time()
+                # Once the run is finished, write the downloadable CSV report.
+                if run["report_path"] is None:
+                    path = write_batch_report(
+                        run_id, [r for r in run["results"] if r is not None]
+                    )
+                    run["report_path"] = path
 
 
-def _batch_run_snapshot(run: dict) -> dict:
+def _batch_run_snapshot(run_id: str, run: dict) -> dict:
     results = [r for r in run["results"] if r is not None]
-    return {
+    snapshot = {
         "total": run["total"],
         "done_count": run["done_count"],
         "finished": run["finished_at"] is not None,
         "error": run["error"],
         "results": results,
     }
+    if run.get("report_path"):
+        snapshot["report_url"] = f"/api/batch-check/{run_id}/report"
+    return snapshot
 
 
 @app.route("/api/batch-check", methods=["POST"])
@@ -901,8 +961,128 @@ def api_batch_check_status(run_id: str):
         run = _batch_runs.get(run_id)
         if run is None:
             return jsonify({"error": "Unknown batch run."}), 404
-        snapshot = _batch_run_snapshot(run)
+        snapshot = _batch_run_snapshot(run_id, run)
     return jsonify(snapshot)
+
+
+# --------------------------------------------------------------------------- #
+# Batch CSV report (saved on the server, downloadable)                        #
+# --------------------------------------------------------------------------- #
+REPORT_HEADERS = [
+    "Domain", "Status", "Subject", "Issuer",
+    "MimecastEntry", "ValidUntil", "RootCA", "LeafCertCN",
+]
+
+
+def _report_dir() -> str:
+    """Directory where batch report files are stored on the server.
+
+    Override with the ``CHECKTLS_REPORT_DIR`` environment variable. Defaults to
+    a ``reports/`` folder next to the application (or in the working directory
+    when running as a frozen executable).
+    """
+    d = os.environ.get("CHECKTLS_REPORT_DIR", "").strip()
+    if not d:
+        base = (
+            os.getcwd() if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(__file__))
+        )
+        d = os.path.join(base, "reports")
+    return d
+
+
+def _csv_field(value) -> str:
+    """Quote one CSV field (doubling embedded double quotes)."""
+    return '"' + str(value if value is not None else "").replace('"', '""') + '"'
+
+
+def _build_report_row(entry: dict) -> list[str]:
+    """Build the report row values for one finished domain result.
+
+    The Status column reflects the overall check status of the domain:
+    PASSED (green), PARTIALLY (yellow) or FAILED (red). Certificate fields are
+    taken from the most representative MX host (best match first).
+    """
+    overall = entry.get("overall", "red")
+    status = {"green": "PASSED", "yellow": "PARTIALLY"}.get(overall, "FAILED")
+
+    hosts = entry.get("hosts") or []
+    ok_hosts = [h for h in hosts if h.get("status") == "ok"]
+
+    def _rank(h: dict) -> int:
+        # Prefer a fully matched, non-expired host; expired certs rank last.
+        if h.get("expired"):
+            return 3
+        if h.get("matched"):
+            return 0
+        if h.get("partial_matched"):
+            return 1
+        return 2
+
+    host = sorted(ok_hosts, key=_rank)[0] if ok_hosts else None
+
+    subject = issuer = mimecast_entry = valid_until = root_ca = leaf_cn = ""
+    if host is not None:
+        details = host.get("details") or []
+        if details:
+            d0 = details[0]
+            subject = f"subject: {d0.get('subject', '')}"
+            issuer = f"issuer: {d0.get('issuer', '')}"
+            valid_until = d0.get("not_valid_after", "") or host.get("valid_until", "")
+        else:
+            valid_until = host.get("valid_until", "")
+        root_ca = host.get("root_ca") or ""
+        leaf_cn = host.get("leaf_cn") or ""
+        mimecast_entry = host.get("matched_entry") or host.get("partial_entry") or ""
+
+    return [entry.get("domain", ""), status, subject, issuer,
+            mimecast_entry, valid_until, root_ca, leaf_cn]
+
+
+def write_batch_report(run_id: str, results: list[dict]) -> Optional[str]:
+    """Write the batch report CSV for a finished run; returns the file path.
+
+    Format: every field is double-quoted and separated by ``;`` (with a trailing
+    ``;`` at the end of each line), e.g.::
+
+        "Domain";"Status";...;"LeafCertCN";
+        "example.com";"PASSED";...;"*.mimecast.com";
+
+    Returns None when the file could not be written (e.g. directory not writable).
+    """
+    try:
+        os.makedirs(_report_dir(), exist_ok=True)
+    except OSError:
+        return None
+    stamp = dt_module.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(_report_dir(), f"batch_report_{stamp}_{run_id[:8]}.csv")
+    lines = [";".join(_csv_field(h) for h in REPORT_HEADERS) + ";"]
+    for entry in results:
+        if entry is None:
+            continue
+        lines.append(";".join(_csv_field(v) for v in _build_report_row(entry)) + ";")
+    try:
+        # utf-8-sig so Excel renders non-ASCII subjects (e.g. CJK) correctly.
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            f.write("\r\n".join(lines) + "\r\n")
+    except OSError:
+        return None
+    return path
+
+
+@app.route("/api/batch-check/<run_id>/report", methods=["GET"])
+def api_batch_report(run_id: str):
+    with _batch_runs_lock:
+        run = _batch_runs.get(run_id)
+        report_path = run["report_path"] if run is not None else None
+    if not report_path or not os.path.isfile(report_path):
+        return jsonify({"error": "Report file not available for this batch run."}), 404
+    return send_file(
+        report_path,
+        as_attachment=True,
+        download_name=os.path.basename(report_path),
+        mimetype="text/csv",
+    )
 
 
 def _build_ocsp_request(cert: x509.Certificate, issuer_cert: x509.Certificate) -> bytes:
