@@ -56,7 +56,7 @@ semicolon-separated fields (with a trailing `;` per line), one row per domain:
 
 ```csv
 "Domain";"Status";"Subject";"Issuer";"MimecastEntry";"ValidUntil";"RootCA";"LeafCertCN";
-"hannover-re.com";"PASSED";"subject: /C=GB/L=London/O=Mimecast Services Limited/CN=*.mimecast.com";"issuer: /C=US/O=DigiCert Inc/CN=DigiCert Global G2 TLS RSA SHA256 2020 CA1";"digicert assured id ca-1 (digicert assured id root ca)";"Feb 24 23:59:59 2027 GMT";"DigiCert Global G2 TLS RSA SHA256 2020 CA1 (DigiCert Inc)";"*.mimecast.com";
+"DOMAINNAME1.com";"PASSED";"subject: /C=GB/L=London/O=Mimecast Services Limited/CN=*.mimecast.com";"issuer: /C=US/O=DigiCert Inc/CN=DigiCert Global G2 TLS RSA SHA256 2020 CA1";"digicert assured id ca-1 (digicert assured id root ca)";"Feb 24 23:59:59 2027 GMT";"DigiCert Global G2 TLS RSA SHA256 2020 CA1 (DigiCert Inc)";"*.mimecast.com";
 ```
 
 - **Status** reflects the overall check status of the domain: `PASSED` (green),
