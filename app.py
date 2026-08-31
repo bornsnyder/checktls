@@ -89,7 +89,10 @@ def _read_env_file(path: str) -> dict[str, str]:
                     continue
                 key, _, value = line.partition("=")
                 values[key.strip()] = value.strip().strip('"').strip("'")
-    except FileNotFoundError:
+    except OSError:
+        # Missing file (first run), path is a directory (Docker auto-creates
+        # missing bind-mount sources that way), or unreadable — treat as "no
+        # stored values" rather than crashing.
         pass
     return values
 
@@ -128,6 +131,21 @@ def _generate_token(length: int = TOKEN_LENGTH) -> str:
 def _bootstrap_auth() -> tuple[str, str]:
     """Return (access_token, secret_key), generating and persisting as needed."""
     path = _env_file_path()
+    if os.path.isdir(path):
+        # Docker auto-creates missing bind-mount sources as empty *directories*;
+        # the env file must be a regular file. Remove it so we can create one.
+        try:
+            os.rmdir(path)
+            print(
+                f"[checktls] Removed empty directory at {path} (auto-created by Docker); creating env file",
+                flush=True,
+            )
+        except OSError as exc:
+            print(
+                f"[checktls] WARNING: {path} is a directory and could not be removed ({exc}); "
+                f"credentials will not be persisted to disk.",
+                flush=True,
+            )
     file_values = _read_env_file(path)
 
     token = os.environ.get("CHECKTLS_TOKEN", "").strip() or file_values.get("CHECKTLS_TOKEN", "")

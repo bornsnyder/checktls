@@ -3,4 +3,5 @@ dnspython>=2.4
 cryptography>=41.0
 beautifulsoup4>=4.12
 requests>=2.31
-gunicorn>=21.2
+# >=25.1 for --no-control-socket (used by the Dockerfile CMD)
+gunicorn>=25.1

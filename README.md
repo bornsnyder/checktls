@@ -108,6 +108,10 @@ sets a session cookie; the **Log out** button on the main page clears it.
   Linux host — the container runs as uid 1000), the token is kept in memory
   for that run only and printed to the logs.
 
+- If `.env` exists as an empty *directory* (Docker auto-creates missing bind-
+  mount sources that way on first run), checktls removes it and creates the
+  file automatically — no manual cleanup needed.
+
 The `.env` file contains live secrets and is git-ignored; do not commit it.
 
 ## Run locally

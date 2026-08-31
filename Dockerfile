@@ -23,9 +23,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY templates/ ./templates/
 
-# Batch CSV reports are written here at runtime; make it writable by the
-# non-root user. Override with CHECKTLS_REPORT_DIR if you want them elsewhere.
-RUN mkdir -p /app/reports && chown 1000:1000 /app/reports
+# Make /app owned by the unprivileged user so it can manage runtime files at
+# startup (e.g. replace Docker's auto-created .env directory with a real file).
+# The reports/ folder is created on demand by the app itself.
+RUN chown -R 1000:1000 /app
 
 # Run as an unprivileged user (created by python:slim).
 USER 1000
@@ -36,4 +37,6 @@ EXPOSE 5000
 # kept in process memory, so every request (upload + status polling) must hit
 # the same worker. Checks are I/O-bound and already parallelized internally
 # via threads (CHECKTLS_BATCH_WORKERS), so one worker is plenty for this app.
-CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:5000", "app:app"]
+# --no-control-socket disables gunicorn 26's control socket, which would
+# otherwise try to create /.gunicorn (HOME is unset for the non-root user).
+CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:5000", "--no-control-socket", "app:app"]
