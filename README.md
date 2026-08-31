@@ -72,8 +72,8 @@ The expected CSV format is an export like `example.csv`:
 Local Group Members Export - 2026-08-27 16:57:02
 
 "Address","Domain","Details","Note"," Int",
-,"'@abchina.com",,,"External",
-,"'@abchina.com.cn",,,"External",
+,"'@DOMAINNAME1.com",,,"External",
+,"'@DOMAINNAME2.net",,,"External",
 ```
 
 Data rows start at line 4; the domain is taken from the second column —
