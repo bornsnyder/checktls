@@ -11,6 +11,7 @@ services:
     restart: unless-stopped
     volumes:
       - checktls_reports:/app/reports   # batch CSV reports survive container rebuilds
+      - ./.env:/app/.env               # access token + session key; auto-created on first run, edit to rotate
     # The container needs outbound internet access for DNS, the Mimecast fetch
     # (HTTPS/443), and direct SMTP to mail servers (ports 25 + 465).
 volumes:

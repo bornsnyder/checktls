@@ -22,3 +22,6 @@ reports/
 Thumbs.db
 .idea/
 .vscode/
+
+# checktls runtime secrets (access token + session key, auto-created on first run)
+.env

@@ -30,6 +30,24 @@
     .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px 80px; }
     h1 { font-size: 1.9rem; margin: 0 0 6px; letter-spacing: -0.02em; }
     .sub { color: var(--muted); margin: 0 0 28px; font-size: 0.95rem; }
+
+    /* Session bar (logged-in indicator + logout) */
+    .session-bar {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 16px;
+    }
+    .session-label {
+      display: inline-flex; align-items: center; gap: 8px;
+      color: var(--muted); font-size: 0.85rem;
+    }
+    .btn-ghost {
+      padding: 7px 14px; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 8px;
+      transition: color .15s ease, border-color .15s ease;
+    }
+    .btn-ghost:hover { color: #fff; border-color: var(--accent); }
+    .session-bar form { display: block; margin: 0; }
     form { display: flex; gap: 10px; margin-bottom: 8px; }
     input[type="text"] {
       flex: 1; padding: 13px 16px; font-size: 1rem;
@@ -165,6 +183,12 @@
 </head>
 <body>
   <div class="wrap">
+    <div class="session-bar">
+      <span class="session-label"><span class="status-dot" style="background: var(--green); color: var(--green);"></span>Access granted</span>
+      <form action="/logout" method="post">
+        <button type="submit" class="btn-ghost">Log out</button>
+      </form>
+    </div>
     <h1>checktls</h1>
     <p class="sub">Checks whether a domain's mail server (MX) root CA is accepted by Mimecast.</p>
 

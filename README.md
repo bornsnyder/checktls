@@ -82,6 +82,34 @@ Leading quotes/`@`, whitespace and trailing dots are stripped, duplicates are
 removed, and rows without a usable domain are skipped. Checks run in parallel
 (`CHECKTLS_BATCH_WORKERS`, default 8).
 
+## Access token (login)
+
+All pages and API endpoints require sign-in with a shared **access token**
+(there are no individual user accounts). The login page asks for the token and
+sets a session cookie; the **Log out** button on the main page clears it.
+
+- On first start, checktls generates a random 15-character token (plus a
+  session signing key) and saves both to an `.env` file next to where the app
+  runs — for Docker Compose that is the project directory, mounted into the
+  container at `/app/.env`. The current token is also printed in the logs on
+  every start:
+
+  ```bash
+  docker compose logs checktls | grep -i "access token"
+  ```
+
+- **Rotate the token**: edit the `CHECKTLS_TOKEN=` line in `.env`, then run
+  `docker compose restart checktls`. Rotating the token invalidates all active
+  sessions, so everyone must sign in again with the new token.
+
+- The value can also be supplied via the `CHECKTLS_TOKEN` environment variable
+  (takes precedence over the file), and the file location can be changed with
+  `CHECKTLS_TOKEN_FILE`. If the file cannot be written (e.g. permissions on a
+  Linux host — the container runs as uid 1000), the token is kept in memory
+  for that run only and printed to the logs.
+
+The `.env` file contains live secrets and is git-ignored; do not commit it.
+
 ## Run locally
 
 ```bash

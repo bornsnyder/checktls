@@ -15,9 +15,12 @@ import base64
 import concurrent.futures
 import csv
 import datetime as dt_module
+import hashlib
+import hmac
 import io
 import os
 import re
+import secrets
 import socket
 import ssl
 import sys
@@ -31,7 +34,16 @@ import requests
 from bs4 import BeautifulSoup
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
 
 def _resource_dir() -> str:
     """Directory that holds bundled resources (templates).
@@ -45,6 +57,122 @@ def _resource_dir() -> str:
 
 
 app = Flask(__name__, template_folder=os.path.join(_resource_dir(), "templates"))
+
+# --------------------------------------------------------------------------- #
+# Access token / login bootstrap                                              #
+# --------------------------------------------------------------------------- #
+# The service is protected by a single shared access token. Resolution order
+# at startup:
+#   1. CHECKTLS_TOKEN environment variable (explicit override)
+#   2. CHECKTLS_TOKEN= line in the env file (default: ./.env, see below)
+#   3. Generate a new random token and persist it to the env file
+# The session signing key follows the same pattern via CHECKTLS_SECRET_KEY so
+# sessions survive container restarts. Editing CHECKTLS_TOKEN in the env file
+# and restarting invalidates all existing sessions (see _TOKEN_HASH).
+
+TOKEN_LENGTH = 15
+# Human-friendly alphabet: no 0/O/1/l/I so the token is easy to type and share.
+TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+
+
+def _env_file_path() -> str:
+    return os.environ.get("CHECKTLS_TOKEN_FILE", "").strip() or os.path.join(os.getcwd(), ".env")
+
+
+def _read_env_file(path: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return values
+
+
+def _write_env_file(path: str, updates: dict[str, str]) -> None:
+    """Create or update KEY=VALUE lines in the env file without touching others."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            existing_lines = fh.read().splitlines()
+    except FileNotFoundError:
+        if updates:
+            existing_lines = ["# checktls configuration (auto-managed; safe to edit)"]
+    replaced: set[str] = set()
+    out: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        key = None
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+        if key is not None and key in updates:
+            out.append(f"{key}={updates[key]}")
+            replaced.add(key)
+        else:
+            out.append(line)
+    for key, value in updates.items():
+        if key not in replaced:
+            out.append(f"{key}={value}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out).rstrip() + "\n")
+
+
+def _generate_token(length: int = TOKEN_LENGTH) -> str:
+    return "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(length))
+
+
+def _bootstrap_auth() -> tuple[str, str]:
+    """Return (access_token, secret_key), generating and persisting as needed."""
+    path = _env_file_path()
+    file_values = _read_env_file(path)
+
+    token = os.environ.get("CHECKTLS_TOKEN", "").strip() or file_values.get("CHECKTLS_TOKEN", "")
+    secret_key = (
+        os.environ.get("CHECKTLS_SECRET_KEY", "").strip()
+        or file_values.get("CHECKTLS_SECRET_KEY", "")
+    )
+
+    updates: dict[str, str] = {}
+    if not token:
+        token = _generate_token()
+        updates["CHECKTLS_TOKEN"] = token
+    if not secret_key:
+        secret_key = secrets.token_hex(32)
+        updates["CHECKTLS_SECRET_KEY"] = secret_key
+
+    if updates:
+        try:
+            _write_env_file(path, updates)
+            note = f"saved to {path}"
+        except OSError as exc:
+            print(f"[checktls] WARNING: could not persist credentials to {path}: {exc}", flush=True)
+            note = "kept in memory for this run only (not persisted)"
+        if "CHECKTLS_TOKEN" in updates:
+            print(f"[checktls] Generated access token {token} ({note})", flush=True)
+        else:
+            print(
+                f"[checktls] Using existing access token {token}; generated session signing key ({note})",
+                flush=True,
+            )
+    else:
+        print(f"[checktls] Access token active: {token} (from {path})", flush=True)
+    return token, secret_key
+
+
+ACCESS_TOKEN, SECRET_KEY = _bootstrap_auth()
+# Hash of the active token; stored in each session so rotating the token in
+# the env file invalidates every existing session on restart.
+_TOKEN_HASH = hashlib.sha256(ACCESS_TOKEN.encode("utf-8")).hexdigest()
+
+app.secret_key = SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
 
 MIMECAST_URL = (
     "https://mimecastsupport.zendesk.com/hc/en-us/articles/"
@@ -682,6 +810,73 @@ def _ocsp_status(cert: x509.Certificate, issuer_cert: Optional[x509.Certificate]
         return f"OCSP response status: {status}"
     except Exception:
         return "OCSP status unknown (lookup failed)"
+
+
+# --------------------------------------------------------------------------- #
+# Login / session guard (mandatory access token)                              #
+# --------------------------------------------------------------------------- #
+_LOGIN_FAIL_LIMIT = 20      # max failed attempts per IP ...
+_LOGIN_FAIL_WINDOW = 60.0   # ... within this many seconds
+_login_failures: dict[str, list[float]] = {}
+_login_failures_lock = threading.Lock()
+
+
+def _is_authenticated() -> bool:
+    return session.get("authed") is True and session.get("token_hash") == _TOKEN_HASH
+
+
+def _login_rate_limited(ip: str) -> bool:
+    now = time.time()
+    with _login_failures_lock:
+        attempts = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_FAIL_WINDOW]
+        _login_failures[ip] = attempts
+        return len(attempts) >= _LOGIN_FAIL_LIMIT
+
+
+def _record_login_failure(ip: str) -> None:
+    with _login_failures_lock:
+        _login_failures.setdefault(ip, []).append(time.time())
+
+
+@app.before_request
+def require_login():
+    if request.endpoint in ("static", "login"):
+        return None
+    if _is_authenticated():
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Authentication required. Please log in."}), 401
+    return redirect(url_for("login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if _is_authenticated():
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        ip = request.remote_addr or "unknown"
+        if _login_rate_limited(ip):
+            return render_template(
+                "login.html",
+                error="Too many failed attempts. Please try again in a minute.",
+            ), 429
+        submitted = (request.form.get("token") or "").strip()
+        if hmac.compare_digest(submitted.encode("utf-8"), ACCESS_TOKEN.encode("utf-8")):
+            session["authed"] = True
+            session["token_hash"] = _TOKEN_HASH
+            with _login_failures_lock:
+                _login_failures.pop(ip, None)
+            return redirect(url_for("index"))
+        _record_login_failure(ip)
+        error = "Invalid access token."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 # --------------------------------------------------------------------------- #
